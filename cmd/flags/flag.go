@@ -25,7 +25,7 @@ type Config struct {
 	MemoryReportRawUsed  bool    `json:"memory_report_raw_used" env:"AGENT_MEMORY_REPORT_RAW_USED"`   // 使用原始内存使用情况报告
 	CustomDNS            string  `json:"custom_dns" env:"AGENT_CUSTOM_DNS"`                           // 使用的自定义DNS服务器
 	EnableGPU            bool    `json:"enable_gpu" env:"AGENT_ENABLE_GPU"`                           // 启用详细GPU监控
-	ShowWarning          bool    `json:"show_warning" env:"AGENT_SHOW_WARNING"`                       // Windows 上显示安全警告，作为子进程运行一次
+	ShowWarning          bool    `json:"show_warning" env:"AGENT_SHOW_WARNING"`                       // 已弃用：Windows 不再弹出远程控制提示
 	CustomIpv4           string  `json:"custom_ipv4" env:"AGENT_CUSTOM_IPV4"`                         // 自定义 IPv4 地址
 	CustomIpv6           string  `json:"custom_ipv6" env:"AGENT_CUSTOM_IPV6"`                         // 自定义 IPv6 地址
 	GetIpAddrFromNic     bool    `json:"get_ip_addr_from_nic" env:"AGENT_GET_IP_ADDR_FROM_NIC"`       // 从网卡获取IP地址

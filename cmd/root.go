@@ -87,15 +87,6 @@ var RootCmd = &cobra.Command{
 			os.Exit(0)
 		}()
 
-		if flags.ShowWarning {
-			ShowToast()
-			os.Exit(0)
-		}
-
-		if pkg_flags.RemoteControlEnabled() {
-			go WarnLiteRunning()
-		}
-
 		if flags.MonthRotate != 0 {
 			err := netstatic.StartOrContinue()
 			if err != nil {
@@ -399,7 +390,9 @@ func init() {
 	RootCmd.PersistentFlags().BoolVar(&flags.MemoryReportRawUsed, "memory-exclude-bcf", false, "Use \"raminfo.Used = v.Total - v.Free - v.Buffers - v.Cached\" calculation for memory usage")
 	RootCmd.PersistentFlags().StringVar(&flags.CustomDNS, "custom-dns", "", "Custom DNS server to use (e.g. 8.8.8.8, 114.114.114.114). By default, the program uses the system DNS resolver.")
 	RootCmd.PersistentFlags().BoolVar(&flags.EnableGPU, "gpu", false, "Enable detailed GPU monitoring (usage, memory, multi-GPU support)")
-	RootCmd.PersistentFlags().BoolVar(&flags.ShowWarning, "show-warning", false, "Show security warning on Windows, run once as a subprocess")
+	RootCmd.PersistentFlags().BoolVar(&flags.ShowWarning, "show-warning", false, "Deprecated; ignored")
+	_ = RootCmd.PersistentFlags().MarkHidden("show-warning")
+	_ = RootCmd.PersistentFlags().MarkDeprecated("show-warning", "Windows no longer shows a remote-control toast")
 	RootCmd.PersistentFlags().StringVar(&flags.CustomIpv4, "custom-ipv4", "", "Custom IPv4 address to use")
 	RootCmd.PersistentFlags().StringVar(&flags.CustomIpv6, "custom-ipv6", "", "Custom IPv6 address to use")
 	RootCmd.PersistentFlags().BoolVar(&flags.GetIpAddrFromNic, "get-ip-addr-from-nic", false, "Get IP address from network interface")

@@ -252,8 +252,10 @@ function Remove-AgentService {
 function Wait-AgentService {
     param([string]$Name)
     for ($i = 0; $i -lt 15; $i++) {
-        $status = nssm status $Name 2>&1 | Out-String
-        if ($status -match "SERVICE_RUNNING") { return $true }
+        $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
+        if ($svc -and $svc.Status -eq 'Running') { return $true }
+        $status = & nssm status $Name 2>&1 | Out-String
+        if ($status -match 'SERVICE_RUNNING') { return $true }
         Start-Sleep -Seconds 1
     }
     return $false
@@ -262,12 +264,13 @@ function Wait-AgentService {
 function Test-AgentServiceExists {
     param([string]$Name)
     if ([string]::IsNullOrWhiteSpace($Name)) { return $false }
+    $svc = Get-Service -Name $Name -ErrorAction SilentlyContinue
+    if ($svc) { return $true }
     $status = & nssm status $Name 2>&1 | Out-String
-    if ([string]::IsNullOrWhiteSpace($status)) { return $false }
-    if ($status -match "does not exist" -or $status -match "Can't open service" -or $status -match "OpenService\(\)") {
-        return $false
+    if ($status -match 'SERVICE_(STOPPED|RUNNING|PAUSED|START_PENDING|STOP_PENDING|CONTINUE_PENDING|PAUSE_PENDING)') {
+        return $true
     }
-    return $true
+    return $false
 }
 
 function Test-LegacyInstallPresent {
