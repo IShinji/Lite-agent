@@ -12,6 +12,7 @@ import (
 	"hash"
 	"io"
 	"io/fs"
+	"math"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -22,11 +23,14 @@ import (
 )
 
 const (
-	maxFileTransferSize    = int64(2 << 30)
-	maxFileChunkSize       = 384 << 10
-	downloadChunkSize      = 256 << 10
-	maxConcurrentUploads   = 2
-	maxConcurrentDownloads = 2
+	maxFileTransferSize     = int64(2 << 30)
+	maxFileChunkSize        = 1 << 20
+	downloadChunkSize       = 256 << 10
+	binaryDownloadChunkSize = 1 << 20
+	maxConcurrentUploads    = 2
+	maxConcurrentDownloads  = 2
+	maxPendingUploadChunks  = 8
+	fileTransferVersion     = 2
 )
 
 var (
@@ -46,6 +50,7 @@ type fileRequest struct {
 	Size        int64  `json:"size,omitempty"`
 	Overwrite   bool   `json:"overwrite,omitempty"`
 	Recursive   bool   `json:"recursive,omitempty"`
+	Binary      bool   `json:"binary,omitempty"`
 	Offset      *int   `json:"offset,omitempty"`
 	Limit       int    `json:"limit,omitempty"`
 	Encoding    string `json:"encoding,omitempty"`
@@ -82,6 +87,22 @@ type uploadState struct {
 	received  int64
 	overwrite bool
 	hash      hash.Hash
+	pending   map[int64]parkedUploadChunk
+}
+
+type parkedUploadChunk struct {
+	request fileRequest
+	data    []byte
+}
+
+type fileTask struct {
+	json   []byte
+	upload *incomingUpload
+}
+
+type incomingUpload struct {
+	request fileRequest
+	data    []byte
 }
 
 type fileResponseWriter interface {
@@ -101,7 +122,7 @@ type fileManager struct {
 	mu                  sync.Mutex
 	uploads             map[string]*uploadState
 	downloads           map[string]*downloadHandle
-	jobs                chan []byte
+	jobs                chan fileTask
 	closed              bool
 	uploadCount         int
 	reservedUploadBytes int64
@@ -118,7 +139,7 @@ func newFileManager(writer fileResponseWriter) *fileManager {
 		cancel:    cancel,
 		uploads:   make(map[string]*uploadState),
 		downloads: make(map[string]*downloadHandle),
-		jobs:      make(chan []byte, fileQueueSize),
+		jobs:      make(chan fileTask, fileQueueSize),
 	}
 	for i := 0; i < fileWorkerCount; i++ {
 		go manager.worker()
@@ -156,20 +177,49 @@ func (manager *fileManager) worker() {
 		select {
 		case <-manager.ctx.Done():
 			return
-		case payload, ok := <-manager.jobs:
+		case task, ok := <-manager.jobs:
 			if !ok {
 				return
 			}
 			if manager.beforeHandle != nil {
 				manager.beforeHandle()
 			}
-			manager.handleCtx(manager.ctx, payload)
+			if task.upload != nil {
+				manager.uploadChunkBytes(task.upload.request, task.upload.data)
+				continue
+			}
+			manager.handleCtx(manager.ctx, task.json)
 		}
 	}
 }
 
 func (manager *fileManager) enqueue(payload []byte) {
-	copied := append([]byte(nil), payload...)
+	manager.submit(fileTask{json: append([]byte(nil), payload...)})
+}
+
+func (manager *fileManager) enqueueFileFrame(payload []byte) bool {
+	frame, ok := parseUploadFrame(payload)
+	if !ok {
+		return false
+	}
+	if frame.offset > uint64(maxFileTransferSize) || frame.offset > uint64(math.MaxInt) {
+		manager.respond(fileRequest{Type: "file.upload.chunk", ID: frame.requestID}, nil, errors.New("upload chunk offset mismatch"))
+		return true
+	}
+	offset := int(frame.offset)
+	manager.submit(fileTask{upload: &incomingUpload{
+		request: fileRequest{
+			Type:     "file.upload.chunk",
+			ID:       frame.requestID,
+			UploadID: frame.uploadID,
+			Offset:   &offset,
+		},
+		data: frame.payload,
+	}})
+	return true
+}
+
+func (manager *fileManager) submit(task fileTask) {
 	manager.mu.Lock()
 	closed := manager.closed
 	manager.mu.Unlock()
@@ -177,10 +227,14 @@ func (manager *fileManager) enqueue(payload []byte) {
 		return
 	}
 	select {
-	case manager.jobs <- copied:
+	case manager.jobs <- task:
 	default:
-		var request fileRequest
-		_ = json.Unmarshal(copied, &request)
+		request := fileRequest{}
+		if task.upload != nil {
+			request = task.upload.request
+		} else {
+			_ = json.Unmarshal(task.json, &request)
+		}
 		manager.respond(request, nil, errors.New("file manager is busy"))
 	}
 }
@@ -964,11 +1018,8 @@ func (manager *fileManager) readDownloadHandle(request fileRequest) {
 		offset = 0
 	}
 	maxBytes := request.MaxBytes
-	if maxBytes <= 0 {
-		maxBytes = 64 << 10
-	}
-	if maxBytes > 256<<10 {
-		maxBytes = 256 << 10
+	if maxBytes <= 0 || maxBytes > maxFileChunkSize {
+		maxBytes = maxFileChunkSize
 	}
 	if _, err := handle.file.Seek(offset, io.SeekStart); err != nil {
 		manager.respond(request, nil, err)
@@ -1111,6 +1162,21 @@ func (manager *fileManager) startUpload(request fileRequest) {
 }
 
 func (manager *fileManager) uploadChunk(request fileRequest) {
+	data, err := base64.StdEncoding.DecodeString(request.Data)
+	if err != nil {
+		manager.respond(request, nil, errors.New("invalid upload chunk"))
+		return
+	}
+	manager.uploadChunkBytes(request, data)
+}
+
+type uploadChunkResult struct {
+	request  fileRequest
+	received int64
+	err      error
+}
+
+func (manager *fileManager) uploadChunkBytes(request fileRequest, data []byte) {
 	manager.mu.Lock()
 	upload := manager.uploads[request.UploadID]
 	manager.mu.Unlock()
@@ -1118,27 +1184,80 @@ func (manager *fileManager) uploadChunk(request fileRequest) {
 		manager.respond(request, nil, errors.New("upload session not found"))
 		return
 	}
-	data, err := base64.StdEncoding.DecodeString(request.Data)
-	if err == nil && len(data) > maxFileChunkSize {
-		err = errors.New("upload chunk is too large")
+	if len(data) == 0 {
+		manager.respond(request, nil, errors.New("upload chunk is empty"))
+		return
 	}
+	if len(data) > maxFileChunkSize {
+		manager.respond(request, nil, errors.New("upload chunk is too large"))
+		return
+	}
+
 	upload.mu.Lock()
-	if err == nil && request.Offset != nil && int64(*request.Offset) != upload.received {
-		err = errors.New("upload chunk offset mismatch")
-	}
-	if err == nil && upload.received+int64(len(data)) > upload.expected {
-		err = errors.New("upload exceeds declared size")
-	}
-	if err == nil {
-		_, err = upload.file.Write(data)
-	}
-	if err == nil {
-		upload.received += int64(len(data))
-		_, _ = upload.hash.Write(data)
-	}
-	received := upload.received
+	results := manager.acceptUploadChunkLocked(upload, request, data)
 	upload.mu.Unlock()
-	manager.respond(request, map[string]any{"received": received}, err)
+	for _, result := range results {
+		if result.err != nil {
+			manager.respond(result.request, nil, result.err)
+			continue
+		}
+		manager.respond(result.request, map[string]any{"received": result.received}, nil)
+	}
+}
+
+func (manager *fileManager) acceptUploadChunkLocked(upload *uploadState, request fileRequest, data []byte) []uploadChunkResult {
+	offset := upload.received
+	if request.Offset != nil {
+		if *request.Offset < 0 {
+			return []uploadChunkResult{{request: request, err: errors.New("upload chunk offset mismatch")}}
+		}
+		offset = int64(*request.Offset)
+	}
+	if offset < upload.received || offset+int64(len(data)) > upload.expected {
+		message := "upload chunk offset mismatch"
+		if offset >= upload.received {
+			message = "upload exceeds declared size"
+		}
+		return []uploadChunkResult{{request: request, err: errors.New(message)}}
+	}
+	if offset > upload.received {
+		if upload.pending == nil {
+			upload.pending = map[int64]parkedUploadChunk{}
+		}
+		if _, exists := upload.pending[offset]; exists || len(upload.pending) >= maxPendingUploadChunks {
+			return []uploadChunkResult{{request: request, err: errors.New("upload chunk offset mismatch")}}
+		}
+		upload.pending[offset] = parkedUploadChunk{request: request, data: append([]byte(nil), data...)}
+		return nil
+	}
+
+	results := make([]uploadChunkResult, 0, 1+len(upload.pending))
+	if err := writeUploadChunkLocked(upload, data); err != nil {
+		return []uploadChunkResult{{request: request, err: err}}
+	}
+	results = append(results, uploadChunkResult{request: request, received: upload.received})
+	for {
+		parked, ok := upload.pending[upload.received]
+		if !ok {
+			break
+		}
+		delete(upload.pending, upload.received)
+		if err := writeUploadChunkLocked(upload, parked.data); err != nil {
+			results = append(results, uploadChunkResult{request: parked.request, err: err})
+			break
+		}
+		results = append(results, uploadChunkResult{request: parked.request, received: upload.received})
+	}
+	return results
+}
+
+func writeUploadChunkLocked(upload *uploadState, data []byte) error {
+	if _, err := upload.file.Write(data); err != nil {
+		return err
+	}
+	upload.received += int64(len(data))
+	_, _ = upload.hash.Write(data)
+	return nil
 }
 
 func (manager *fileManager) finishUpload(request fileRequest) {
@@ -1272,7 +1391,14 @@ func (manager *fileManager) download(request fileRequest) {
 		"name": filepath.Base(path), "size": info.Size(),
 	})
 	hasher := sha256.New()
-	buffer := make([]byte, downloadChunkSize)
+	binaryWriter, binary := manager.writer.(interface{ writeBinary([]byte) error })
+	chunkSize := downloadChunkSize
+	if request.Binary && binary {
+		chunkSize = binaryDownloadChunkSize
+	} else {
+		binary = false
+	}
+	buffer := make([]byte, chunkSize)
 	sequence := 0
 	for {
 		select {
@@ -1283,10 +1409,20 @@ func (manager *fileManager) download(request fileRequest) {
 		count, readErr := file.Read(buffer)
 		if count > 0 {
 			_, _ = hasher.Write(buffer[:count])
-			if err := manager.writer.writeJSON(map[string]any{
-				"type": "file.download.chunk", "id": request.ID, "sequence": sequence,
-				"data": base64.StdEncoding.EncodeToString(buffer[:count]),
-			}); err != nil {
+			var err error
+			if binary {
+				var frame []byte
+				frame, err = encodeDownloadFrame(request.ID, uint64(sequence), buffer[:count])
+				if err == nil {
+					err = binaryWriter.writeBinary(frame)
+				}
+			} else {
+				err = manager.writer.writeJSON(map[string]any{
+					"type": "file.download.chunk", "id": request.ID, "sequence": sequence,
+					"data": base64.StdEncoding.EncodeToString(buffer[:count]),
+				})
+			}
+			if err != nil {
 				return
 			}
 			sequence++

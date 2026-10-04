@@ -22,7 +22,7 @@ import (
 )
 
 var (
-	CurrentVersion string = "2.3.3.7"
+	CurrentVersion string = "2.3.6.0"
 	Repo           string = "nuomiiiii/Lite-agent"
 )
 

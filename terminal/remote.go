@@ -25,6 +25,10 @@ func (writer *remoteWriter) writeJSON(value any) error {
 	return writer.conn.WriteJSON(value)
 }
 
+func (writer *remoteWriter) writeBinary(data []byte) error {
+	return writer.writeMessage(websocket.BinaryMessage, data)
+}
+
 func StartRemoteSession(conn *websocket.Conn) {
 	writer := &remoteWriter{conn: conn}
 	if !remoteControlEnabled() {
@@ -47,10 +51,11 @@ func StartRemoteSession(conn *websocket.Conn) {
 	}()
 
 	_ = writer.writeJSON(map[string]any{
-		"type":      "remote.ready",
-		"roots":     filesystemRoots(),
-		"home":      userHomeDirectory(),
-		"separator": pathSeparator(),
+		"type":          "remote.ready",
+		"roots":         filesystemRoots(),
+		"home":          userHomeDirectory(),
+		"separator":     pathSeparator(),
+		"file_transfer": fileTransferVersion,
 	})
 
 	go handleRemoteTerminalOutput(writer, impl.term, errCh, done)
@@ -63,6 +68,9 @@ func StartRemoteSession(conn *websocket.Conn) {
 			}
 			switch messageType {
 			case websocket.BinaryMessage:
+				if manager.enqueueFileFrame(payload) {
+					continue
+				}
 				if _, err := impl.term.Write(payload); err != nil {
 					errCh <- err
 					return

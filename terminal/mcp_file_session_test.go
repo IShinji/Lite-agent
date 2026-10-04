@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -56,6 +57,131 @@ func TestMCPFileSessionKeepsUploadAcrossCalls(t *testing.T) {
 	}
 	if string(got) != "abcd" {
 		t.Fatalf("uploaded file = %q", got)
+	}
+}
+
+func TestMCPFileSessionAcceptsConcurrentChunks(t *testing.T) {
+	directory := t.TempDir()
+	target := filepath.Join(directory, "out.bin")
+	leaseID := "ls_session_parallel"
+	t.Cleanup(func() { CloseMCPFileSession(leaseID) })
+
+	startRaw, _ := json.Marshal(map[string]any{
+		"type":      "file.upload.start",
+		"id":        "start",
+		"path":      target,
+		"size":      6,
+		"overwrite": true,
+	})
+	started, err := ExecuteMCPFileForLease(context.Background(), leaseID, startRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploadID := fileResponseData(t, started)["upload_id"].(string)
+
+	var group sync.WaitGroup
+	errs := make(chan error, 2)
+	send := func(id string, offset int, data string) {
+		defer group.Done()
+		raw, _ := json.Marshal(map[string]any{
+			"type":      "file.upload.chunk",
+			"id":        id,
+			"upload_id": uploadID,
+			"offset":    offset,
+			"data":      base64.StdEncoding.EncodeToString([]byte(data)),
+		})
+		if _, err := ExecuteMCPFileForLease(context.Background(), leaseID, raw); err != nil {
+			errs <- err
+		}
+	}
+	group.Add(2)
+	go send("late", 3, "xyz")
+	go send("early", 0, "abc")
+	group.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+
+	finishRaw, _ := json.Marshal(map[string]any{
+		"type":      "file.upload.finish",
+		"id":        "finish",
+		"upload_id": uploadID,
+	})
+	if _, err := ExecuteMCPFileForLease(context.Background(), leaseID, finishRaw); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "abcxyz" {
+		t.Fatalf("uploaded file = %q", got)
+	}
+}
+
+func TestMCPFileChunkWaitDoesNotBlockOtherOps(t *testing.T) {
+	directory := t.TempDir()
+	target := filepath.Join(directory, "out.bin")
+	leaseID := "ls_session_lock"
+	t.Cleanup(func() { CloseMCPFileSession(leaseID) })
+
+	startRaw, _ := json.Marshal(map[string]any{
+		"type":      "file.upload.start",
+		"id":        "start",
+		"path":      target,
+		"size":      6,
+		"overwrite": true,
+	})
+	started, err := ExecuteMCPFileForLease(context.Background(), leaseID, startRaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	uploadID := fileResponseData(t, started)["upload_id"].(string)
+
+	lateCtx, lateCancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer lateCancel()
+	lateDone := make(chan error, 1)
+	go func() {
+		raw, _ := json.Marshal(map[string]any{
+			"type":      "file.upload.chunk",
+			"id":        "late",
+			"upload_id": uploadID,
+			"offset":    3,
+			"data":      base64.StdEncoding.EncodeToString([]byte("xyz")),
+		})
+		_, err := ExecuteMCPFileForLease(lateCtx, leaseID, raw)
+		lateDone <- err
+	}()
+	select {
+	case err := <-lateDone:
+		t.Fatalf("late chunk returned before its prefix: %v", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	listCtx, listCancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer listCancel()
+	listRaw, _ := json.Marshal(map[string]any{
+		"type": "file.list",
+		"id":   "list",
+		"path": directory,
+	})
+	if _, err := ExecuteMCPFileForLease(listCtx, leaseID, listRaw); err != nil {
+		t.Fatalf("list blocked behind an out-of-order chunk: %v", err)
+	}
+
+	earlyRaw, _ := json.Marshal(map[string]any{
+		"type":      "file.upload.chunk",
+		"id":        "early",
+		"upload_id": uploadID,
+		"offset":    0,
+		"data":      base64.StdEncoding.EncodeToString([]byte("abc")),
+	})
+	if _, err := ExecuteMCPFileForLease(context.Background(), leaseID, earlyRaw); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-lateDone; err != nil {
+		t.Fatal(err)
 	}
 }
 

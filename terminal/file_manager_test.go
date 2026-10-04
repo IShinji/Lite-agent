@@ -335,7 +335,7 @@ func TestUploadIdenticalChunksAtDifferentOffsets(t *testing.T) {
 	}
 }
 
-func TestUploadChunkRejectsOffsetMismatch(t *testing.T) {
+func TestUploadChunkAcceptsOutOfOrderChunks(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "skip.bin")
 	writer := &recordingFileWriter{}
 	manager := newFileManager(writer)
@@ -343,10 +343,53 @@ func TestUploadChunkRejectsOffsetMismatch(t *testing.T) {
 
 	manager.startUpload(fileRequest{Type: "file.upload.start", ID: "start", Path: target, Size: 6})
 	uploadID := uploadIDFromResponse(t, writer.last(t))
-	manager.uploadChunk(fileRequest{Type: "file.upload.chunk", ID: "c0", UploadID: uploadID, Offset: offsetPtr(3), Data: base64.StdEncoding.EncodeToString([]byte("abc"))})
-	if responseOK(t, writer.last(t)) {
-		t.Fatal("chunk at offset 3 should fail when received is 0")
+	manager.uploadChunk(fileRequest{Type: "file.upload.chunk", ID: "c1", UploadID: uploadID, Offset: offsetPtr(3), Data: base64.StdEncoding.EncodeToString([]byte("xyz"))})
+	if len(writer.messages) != 1 {
+		t.Fatalf("future chunk should wait for the missing prefix, messages %#v", writer.messages)
 	}
+	manager.uploadChunk(fileRequest{Type: "file.upload.chunk", ID: "c0", UploadID: uploadID, Offset: offsetPtr(0), Data: base64.StdEncoding.EncodeToString([]byte("abc"))})
+	manager.finishUpload(fileRequest{Type: "file.upload.finish", ID: "finish", UploadID: uploadID})
+	if !responseOK(t, writer.last(t)) {
+		t.Fatalf("out-of-order upload failed: %#v", writer.last(t))
+	}
+	actual, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(actual) != "abcxyz" {
+		t.Fatalf("uploaded content = %q, want abcxyz", actual)
+	}
+}
+
+func TestBinaryDownloadStreamsRawChunks(t *testing.T) {
+	target := filepath.Join(t.TempDir(), "blob.bin")
+	payload := []byte("hello-binary")
+	if err := os.WriteFile(target, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writer := &recordingBinaryWriter{}
+	manager := newFileManager(writer)
+	defer manager.close()
+	manager.download(fileRequest{Type: "file.download", ID: "download", Path: target, Binary: true})
+	if len(writer.binary) != 1 {
+		t.Fatalf("binary frames = %d, want 1", len(writer.binary))
+	}
+	frame, ok := parseDownloadFrame(writer.binary[0])
+	if !ok || frame.requestID != "download" || frame.sequence != 0 || string(frame.payload) != string(payload) {
+		t.Fatalf("download frame = %#v, ok %v", frame, ok)
+	}
+}
+
+type recordingBinaryWriter struct {
+	recordingFileWriter
+	binary [][]byte
+}
+
+func (writer *recordingBinaryWriter) writeBinary(data []byte) error {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	writer.binary = append(writer.binary, append([]byte(nil), data...))
+	return nil
 }
 
 func TestOverwriteUploadReplacesRegularFile(t *testing.T) {

@@ -2,7 +2,7 @@
 
 Lite 的跨平台节点监控 Agent。本仓库版本在基础监控之外，支持安全远程终端、文件管理、远程命令、Cloudflare Access、在线配置下发与配置结果回执。
 
-当前稳定版本：`2.3.3.7`
+当前稳定版本：`2.3.6.0`
 
 使用 MCP 代理功能，Lite需升级至 2.3.3 或更高版本。
 
@@ -59,7 +59,7 @@ docker pull ghcr.io/nuomiiiii/Lite-agent:latest
 也可以拉取固定版本：
 
 ```bash
-docker pull ghcr.io/nuomiiiii/Lite-agent:2.3.3.7
+docker pull ghcr.io/nuomiiiii/Lite-agent:2.3.6.0
 ```
 
 容器的启动参数、宿主机目录挂载和节点 Token 请以 Lite 后台生成的部署命令为准。Docker 部署不会在容器内替换 Agent 二进制；升级时需拉取新镜像并重建容器。
@@ -245,5 +245,6 @@ Client ID 与 Client Secret 必须成对配置，可以选择命令行参数、�
 | `2.3.3.5` | 优化流量统计跨过重置时刻统计逻辑，会按重置前后分开记录，重置前的流量不会算进新周期。 |
 | `2.3.3.6` | 修复Linux/Windows客户端在远程终端时，部分情况下命令无法tab补全的bug |
 | `2.3.3.7` | Windows 开启远程控制后不再弹出桌面提示；修复 Windows 安装脚本误报服务未运行和误提 komari-agent |
+| `2.3.6.0` | 远程文件上传和下载更快；管理后台一起更新后走二进制并并行上传，只升级 Agent 时原方式仍可用 |
 
 完整发布记录和升级说明请查看 [GitHub Releases](https://github.com/nuomiiiii/Lite-agent/releases)。
