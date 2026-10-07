@@ -32,8 +32,9 @@ func Disk() DiskInfo {
 					if err != nil {
 						continue
 					} else {
-						diskinfo.Total += u.Total
-						diskinfo.Used += u.Used
+						total, used := quotaOrStatfs(mountpoint, u.Total, u.Used)
+						diskinfo.Total += total
+						diskinfo.Used += used
 					}
 				}
 			}
@@ -47,6 +48,9 @@ func Disk() DiskInfo {
 					if err != nil {
 						continue
 					}
+					// btrfs 子卷设了 qgroup 配额时，statfs 返回的是整个存储池，改用配额
+					total, used := quotaOrStatfs(part.Mountpoint, u.Total, u.Used)
+					u = &disk.UsageStat{Total: total, Used: used}
 
 					deviceID := part.Device
 					// ZFS去重: 基于 pool 名称 (例如 pool/dataset -> pool)
@@ -75,6 +79,15 @@ func Disk() DiskInfo {
 		}
 	}
 	return diskinfo
+}
+
+// quotaOrStatfs 返回挂载点的 (总量, 已用量)：仅当 btrfs qgroup 配额小于 statfs 总量时采用配额，
+// 其余情况（非 btrfs、读不到、未设上限）原样返回 statfs 的值。
+func quotaOrStatfs(mountpoint string, statTotal, statUsed uint64) (total, used uint64) {
+	if limit, qused, ok := btrfsQuotaFor(mountpoint); ok && limit < statTotal {
+		return limit, qused
+	}
+	return statTotal, statUsed
 }
 
 // isPhysicalDisk 判断分区是否为物理磁盘
