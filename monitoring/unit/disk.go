@@ -13,66 +13,151 @@ type DiskInfo struct {
 	Used  uint64 `json:"used"`
 }
 
+// countedDisk 是一个挂载点计入某块物理设备后的容量。
+// subvol 仅在该挂载点是 btrfs 子卷时有值；quota 表示 total/used 已换成该子卷的 qgroup。
+type countedDisk struct {
+	total  uint64
+	used   uint64
+	subvol string
+	quota  bool
+}
+
+// subvolUsage 是同一子卷多次挂载归并后的结果。seq 是该结果第一次形成时的到达顺序。
+type subvolUsage struct {
+	total uint64
+	used  uint64
+	quota bool
+	seq   int
+}
+
+// diskDevice 先按子卷归并，再决定这块设备对外的一个总量。
+// 子卷号只在所属文件系统内唯一；调用方按设备分桶，不能把不同文件系统放进同一个 diskDevice。
+type diskDevice struct {
+	subvols map[string]subvolUsage
+	seq     int
+}
+
+func newDiskDevice() *diskDevice {
+	return &diskDevice{subvols: make(map[string]subvolUsage)}
+}
+
+func (d *diskDevice) add(sample countedDisk) {
+	d.seq++
+	incoming := subvolUsage{total: sample.total, used: sample.used, quota: sample.quota, seq: d.seq}
+	current, ok := d.subvols[sample.subvol]
+	if !ok {
+		d.subvols[sample.subvol] = incoming
+		return
+	}
+	d.subvols[sample.subvol] = mergeSubvolUsage(current, incoming)
+}
+
+// mergeSubvolUsage 归并同一子卷的重复挂载。
+// 有效配额不会被同子卷的 statfs 样本盖掉。两边都是配额时保留更小的上限。
+// 两边都是普通样本时保留更大的 Total。Total 相等时保留先到的那一组，Total 和 Used 不拆开搭配。
+func mergeSubvolUsage(current, next subvolUsage) subvolUsage {
+	switch {
+	case current.quota && !next.quota:
+		return current
+	case next.quota && !current.quota:
+		return next
+	case current.quota && next.quota:
+		if next.total < current.total {
+			return next
+		}
+		return current
+	default:
+		if next.total > current.total {
+			return next
+		}
+		return current
+	}
+}
+
+// totals 在子卷归并之后选择设备总量。
+// 只要还有一个子卷没有配额，就保留这些不限额子卷里更大的整池容量，避免某个子卷配额把整盘报小。
+// 全部子卷都有配额时保留较大的那一个，不把 referenced 相加。
+// Total 相等时保留先到的样本，因此 Used 和 Total 来自同一次统计。
+func (d *diskDevice) totals() (total, used uint64) {
+	unlimited := false
+	for _, sample := range d.subvols {
+		if !sample.quota {
+			unlimited = true
+			break
+		}
+	}
+	var best subvolUsage
+	found := false
+	for _, sample := range d.subvols {
+		if unlimited && sample.quota {
+			continue
+		}
+		if !found || sample.total > best.total || (sample.total == best.total && sample.seq < best.seq) {
+			best = sample
+			found = true
+		}
+	}
+	return best.total, best.used
+}
+
 func Disk() DiskInfo {
 	diskinfo := DiskInfo{}
 	// 获取所有分区，使用 true 避免物理磁盘被 gopsutil 错误排除
 	usage, err := disk.Partitions(true)
 	if err != nil {
-		diskinfo.Total = 0
-		diskinfo.Used = 0
-	} else {
-		// 如果指定了自定义挂载点，只统计指定的挂载点
-		includeMountpoints := runtimeconfig.IncludeMountpoints()
-		if includeMountpoints != "" {
-			includeMounts := strings.Split(includeMountpoints, ";")
-			for _, mountpoint := range includeMounts {
-				mountpoint = strings.TrimSpace(mountpoint)
-				if mountpoint != "" {
-					u, err := disk.Usage(mountpoint)
-					if err != nil {
-						continue
-					} else {
-						diskinfo.Total += u.Total
-						diskinfo.Used += u.Used
-					}
-				}
+		return diskinfo
+	}
+	// 一次采样只读一遍 mountinfo，同一轮挂载点共用这份结果。
+	probe := newBtrfsProbe()
+	includeMountpoints := runtimeconfig.IncludeMountpoints()
+	if includeMountpoints != "" {
+		// 自定义挂载点按用户列出的项相加。这里只替换每一项自己的 statfs，不去重。
+		for _, mountpoint := range strings.Split(includeMountpoints, ";") {
+			mountpoint = strings.TrimSpace(mountpoint)
+			if mountpoint == "" {
+				continue
 			}
-		} else {
-			// 使用默认逻辑，排除临时文件系统和网络驱动器
-			deviceMap := make(map[string]*disk.UsageStat)
-
-			for _, part := range usage {
-				if isPhysicalDisk(part) {
-					u, err := disk.Usage(part.Mountpoint)
-					if err != nil {
-						continue
-					}
-
-					deviceID := part.Device
-					// ZFS去重: 基于 pool 名称 (例如 pool/dataset -> pool)
-					if strings.ToLower(part.Fstype) == "zfs" {
-						if idx := strings.Index(deviceID, "/"); idx != -1 {
-							deviceID = deviceID[:idx]
-						}
-					}
-
-					// 如果该设备已存在，且当前挂载点的 Total 更大，则替换（处理 quota 等情况）
-					// 否则保留现有的（通常我们希望统计物理 pool 的总量）
-					if existing, ok := deviceMap[deviceID]; ok {
-						if u.Total > existing.Total {
-							deviceMap[deviceID] = u
-						}
-					} else {
-						deviceMap[deviceID] = u
-					}
-				}
+			u, err := disk.Usage(mountpoint)
+			if err != nil {
+				continue
 			}
+			total, used, _, _ := probe.apply(mountpoint, u.Total, u.Used)
+			diskinfo.Total += total
+			diskinfo.Used += used
+		}
+		return diskinfo
+	}
 
-			for _, u := range deviceMap {
-				diskinfo.Total += u.Total
-				diskinfo.Used += u.Used
+	deviceMap := make(map[string]*diskDevice)
+	for _, part := range usage {
+		if !isPhysicalDisk(part) {
+			continue
+		}
+		u, err := disk.Usage(part.Mountpoint)
+		if err != nil {
+			continue
+		}
+		total, used, subvol, quota := probe.apply(part.Mountpoint, u.Total, u.Used)
+		sample := countedDisk{total: total, used: used, subvol: subvol, quota: quota}
+
+		deviceID := part.Device
+		// ZFS去重: 基于 pool 名称 (例如 pool/dataset -> pool)
+		if strings.ToLower(part.Fstype) == "zfs" {
+			if idx := strings.Index(deviceID, "/"); idx != -1 {
+				deviceID = deviceID[:idx]
 			}
 		}
+		dev := deviceMap[deviceID]
+		if dev == nil {
+			dev = newDiskDevice()
+			deviceMap[deviceID] = dev
+		}
+		dev.add(sample)
+	}
+	for _, dev := range deviceMap {
+		total, used := dev.totals()
+		diskinfo.Total += total
+		diskinfo.Used += used
 	}
 	return diskinfo
 }
