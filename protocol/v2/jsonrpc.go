@@ -2,6 +2,7 @@ package v2
 
 import (
 	"encoding/json"
+	"math"
 	"strings"
 	"time"
 )
@@ -185,14 +186,25 @@ type reportParams struct {
 	AckEventIDs []string        `json:"ack_event_ids,omitempty"`
 }
 
+// pingResultWireValues 把探测值拆成旧版能写入的整数毫秒，以及新版使用的小数毫秒。
+// 失败、NaN、Inf 两边都记为 -1。
+func pingResultWireValues(value float64) (int64, float64) {
+	if value < 0 || math.IsNaN(value) || math.IsInf(value, 0) {
+		return -1, -1
+	}
+	return int64(math.Round(value)), value
+}
+
 func BuildPingResultPayload(taskID uint, pingType string, value float64, finishedAt time.Time) interface{} {
+	whole, precise := pingResultWireValues(value)
 	return Request{
 		JSONRPC: Version,
 		Method:  MethodAgentPingResult,
 		Params: map[string]interface{}{
 			"task_id":     taskID,
 			"ping_type":   pingType,
-			"value":       value,
+			"value":       whole,
+			"value_ms":    precise,
 			"finished_at": finishedAt.Format(time.RFC3339Nano),
 		},
 	}

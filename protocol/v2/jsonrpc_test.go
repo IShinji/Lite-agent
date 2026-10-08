@@ -87,6 +87,46 @@ func TestBuildBasicInfoPayloadCarriesConfigResult(t *testing.T) {
 	}
 }
 
+func TestPingResultPayloadIsReadableByLegacyIntegerField(t *testing.T) {
+	finished := time.Date(2026, 10, 9, 0, 0, 0, 0, time.UTC)
+	assertPingWire := func(value float64, wantWhole int, wantPrecise float64) {
+		t.Helper()
+		encoded, err := json.Marshal(BuildPingResultPayload(7, "icmp", value, finished))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var request struct {
+			Params json.RawMessage `json:"params"`
+		}
+		if err := json.Unmarshal(encoded, &request); err != nil {
+			t.Fatal(err)
+		}
+		var legacy struct {
+			Value int `json:"value"`
+		}
+		if err := json.Unmarshal(request.Params, &legacy); err != nil {
+			t.Fatalf("legacy integer field rejected %v: %v", value, err)
+		}
+		if legacy.Value != wantWhole {
+			t.Fatalf("legacy value for %v = %d, want %d", value, legacy.Value, wantWhole)
+		}
+		var precise struct {
+			ValueMS float64 `json:"value_ms"`
+		}
+		if err := json.Unmarshal(request.Params, &precise); err != nil {
+			t.Fatal(err)
+		}
+		if precise.ValueMS != wantPrecise {
+			t.Fatalf("value_ms for %v = %v, want %v", value, precise.ValueMS, wantPrecise)
+		}
+	}
+	assertPingWire(17.36, 17, 17.36)
+	assertPingWire(17.5, 18, 17.5)
+	assertPingWire(17, 17, 17)
+	assertPingWire(0.4, 0, 0.4)
+	assertPingWire(-1, -1, -1)
+}
+
 func TestBuildRouteResultPayloadIncludesReachability(t *testing.T) {
 	finished := time.Unix(0, 0).UTC()
 	payload := BuildRouteResultPayload(RouteParams{TaskID: 3, Protocol: "icmp", Target: "example.com", IPVersion: 4}, nil, "", finished, "1.1.1.1", true)
