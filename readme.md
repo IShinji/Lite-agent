@@ -247,6 +247,6 @@ Client ID 与 Client Secret 必须成对配置，可以选择命令行参数、�
 | `2.3.3.7` | Windows 开启远程控制后不再弹出桌面提示；修复 Windows 安装脚本误报服务未运行和误提 komari-agent |
 | `2.3.6.0` | 远程文件上传和下载更快；管理后台一起更新后走二进制并并行上传，只升级 Agent 时原方式仍可用 |
 | `2.3.6.1` | btrfs 容器（如 LXC/LXD）设置了磁盘配额时，面板上的磁盘总量和已用量改为容器自己的配额，不再显示整个存储池。没有设置配额、不是 btrfs，或配额读不到时，磁盘显示与以前相同。感谢 IShinji 的 [PR #2](https://github.com/nuomiiiii/Lite-agent/pull/2)。 |
-| `2.3.6.2` | ICMP、TCP、HTTP 探测延迟保留毫秒小数，不足 1 毫秒不再显示成 0。失败时仍记为失败。带小数的结果需搭配支持小数毫秒的 Lite；只升级 Agent 时，整毫秒的探测结果仍可上报。 |
+| `2.3.6.2` | ICMP、TCP、HTTP 探测延迟保留毫秒小数，不足 1 毫秒不再显示成 0。失败时仍记为失败。带小数的结果需搭配支持小数毫秒的 Lite（2.3.7 同版本第二次更新及以后版本）；只升级 Agent 时，整毫秒的探测结果仍可上报。 |
 
 完整发布记录和升级说明请查看 [GitHub Releases](https://github.com/nuomiiiii/Lite-agent/releases)。
