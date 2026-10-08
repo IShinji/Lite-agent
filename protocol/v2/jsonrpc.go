@@ -74,11 +74,11 @@ type ConfigParams struct {
 	MonthRotateTime     *string  `json:"month_rotate_time,omitempty"`
 	MonthRotateTimezone *string  `json:"month_rotate_timezone,omitempty"`
 	Interval            *float64 `json:"interval,omitempty"`
-	IncludeNics        *string  `json:"include_nics,omitempty"`
-	ExcludeNics        *string  `json:"exclude_nics,omitempty"`
-	IncludeMountpoints *string  `json:"include_mountpoints,omitempty"`
-	MemoryIncludeCache *bool    `json:"memory_include_cache,omitempty"`
-	EnableGPU          *bool    `json:"enable_gpu,omitempty"`
+	IncludeNics         *string  `json:"include_nics,omitempty"`
+	ExcludeNics         *string  `json:"exclude_nics,omitempty"`
+	IncludeMountpoints  *string  `json:"include_mountpoints,omitempty"`
+	MemoryIncludeCache  *bool    `json:"memory_include_cache,omitempty"`
+	EnableGPU           *bool    `json:"enable_gpu,omitempty"`
 }
 
 type ConfigResultParams struct {
@@ -185,7 +185,7 @@ type reportParams struct {
 	AckEventIDs []string        `json:"ack_event_ids,omitempty"`
 }
 
-func BuildPingResultPayload(taskID uint, pingType string, value int, finishedAt time.Time) interface{} {
+func BuildPingResultPayload(taskID uint, pingType string, value float64, finishedAt time.Time) interface{} {
 	return Request{
 		JSONRPC: Version,
 		Method:  MethodAgentPingResult,

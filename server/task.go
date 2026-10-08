@@ -454,7 +454,11 @@ func resolveIP(target string) (string, error) {
 	return addrs[0], nil // 返回第一个解析的 IP
 }
 
-func icmpPing(target string, timeout time.Duration) (int64, error) {
+func latencyMilliseconds(d time.Duration) float64 {
+	return float64(d) / float64(time.Millisecond)
+}
+
+func icmpPing(target string, timeout time.Duration) (float64, error) {
 	host, _, err := net.SplitHostPort(target)
 	if err != nil {
 		host = target
@@ -484,10 +488,10 @@ func icmpPing(target string, timeout time.Duration) (int64, error) {
 	if stats.PacketsRecv == 0 {
 		return -1, errors.New("no packets received")
 	}
-	return stats.AvgRtt.Milliseconds(), nil
+	return latencyMilliseconds(stats.AvgRtt), nil
 }
 
-func tcpPing(target string, timeout time.Duration) (int64, error) {
+func tcpPing(target string, timeout time.Duration) (float64, error) {
 	host, port, err := net.SplitHostPort(target)
 	if err != nil {
 		// No port, assume port 80
@@ -510,10 +514,10 @@ func tcpPing(target string, timeout time.Duration) (int64, error) {
 		return -1, err
 	}
 	defer conn.Close()
-	return time.Since(start).Milliseconds(), nil
+	return latencyMilliseconds(time.Since(start)), nil
 }
 
-func httpPing(target string, timeout time.Duration) (int64, error) {
+func httpPing(target string, timeout time.Duration) (float64, error) {
 	// Handle raw IPv6 address for URL
 	if strings.Contains(target, ":") && !strings.Contains(target, "[") {
 		// check if it's a valid IP to avoid wrapping hostnames
@@ -549,7 +553,7 @@ func httpPing(target string, timeout time.Duration) (int64, error) {
 	}
 	start := time.Now()
 	resp, err := client.Get(target)
-	latency := time.Since(start).Milliseconds()
+	latency := latencyMilliseconds(time.Since(start))
 	if err != nil {
 		return -1, err
 	}
@@ -566,14 +570,14 @@ func NewPingTask(conn *ws.SafeConn, taskID uint, pingType, pingTarget string) {
 		return
 	}
 	var err error = nil
-	var latency int64
-	pingResult := -1
-	timeout := 3 * time.Second           // 默认超时时间
-	const highLatencyThreshold = 1000    // ms 阈值
-	const retryDropThresholdTcping = 800 // ms 重试中延迟降低超过此值则基本认为发生重传
+	var latency float64
+	pingResult := -1.0
+	timeout := 3 * time.Second             // 默认超时时间
+	const highLatencyThreshold = 1000.0    // ms 阈值
+	const retryDropThresholdTcping = 800.0 // ms 重试中延迟降低超过此值则基本认为发生重传
 	// 800ms = SYN/SYN-ACK 首次超时重传 1000ms - 防误判容许 200ms 延迟抖动
 
-	measure := func() (int64, error) {
+	measure := func() (float64, error) {
 		switch pingType {
 		case "icmp":
 			return icmpPing(pingTarget, timeout)
@@ -589,12 +593,12 @@ func NewPingTask(conn *ws.SafeConn, taskID uint, pingType, pingTarget string) {
 	// 首次测量
 	if latency, err = measure(); err == nil {
 		firstLatency := latency
-		if latency > int64(highLatencyThreshold) && PingHighLatencyRetries > 0 {
+		if latency > highLatencyThreshold && PingHighLatencyRetries > 0 {
 			attempts := PingHighLatencyRetries
 			for i := 0; i < attempts; i++ {
 				if second, err2 := measure(); err2 == nil {
-					if second <= int64(highLatencyThreshold) {
-						if pingType == "tcp" && firstLatency-second > int64(retryDropThresholdTcping) {
+					if second <= highLatencyThreshold {
+						if pingType == "tcp" && firstLatency-second > retryDropThresholdTcping {
 							err = errors.New("suspicious retransmission detected in tcp handshake")
 							break
 						}
@@ -616,7 +620,7 @@ func NewPingTask(conn *ws.SafeConn, taskID uint, pingType, pingTarget string) {
 		log.Printf("Ping task %d failed: %v", taskID, err)
 		pingResult = -1 // 如果有错误，设置结果为 -1
 	} else {
-		pingResult = int(latency)
+		pingResult = latency
 	}
 	finishedAt := time.Now()
 	wsPayload := v2.BuildPingResultPayload(taskID, pingType, pingResult, finishedAt)
